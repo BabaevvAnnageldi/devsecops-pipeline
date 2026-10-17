@@ -1,0 +1,11 @@
+# Shared Checkov config: used by scripts/security-check.sh and the CI workflow,
+# so local and pipeline scans behave the same way.
+framework:
+  - terraform
+# Only scan the real infrastructure. demo/ holds the deliberately insecure
+# example, which uses a .example extension so it is never scanned on main.
+directory:
+  - terraform
+compact: true
+quiet: true            # print failures only
+skip-download: true    # don't fetch guidelines from Prisma Cloud (works offline, no phoning home)
