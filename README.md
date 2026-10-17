@@ -123,7 +123,8 @@ Ironically, the *security scanner* was the attack vector. That's why this repo t
 3. The Trivy binary is pinned explicitly (`TRIVY_VERSION: v0.75.0`), never 0.69.4. The local script refuses to run if it detects 0.69.4.
 4. **Cooldown:** I pin a Trivy release that's a couple of weeks old, not the one published yesterday. Hijacked releases are usually caught within days.
 5. Least privilege: top-level `permissions: contents: read`; `security-events: write` only on the two jobs that upload SARIF; `persist-credentials: false` so the token isn't left on disk for later steps.
-6. Base image pinned by digest, Python dependencies pinned exactly, Terraform providers locked by checksum.
+6. The Gitleaks binary is downloaded at a pinned version and checked against its published SHA-256 before it runs.
+7. Base image pinned by digest, Python dependencies pinned exactly, Terraform providers locked by checksum.
 
 To update a pin: `git ls-remote https://github.com/<owner>/<action> refs/tags/<tag>` (use the `^{}` line for annotated tags), read the release notes and diff, then bump the SHA *and* the comment. Dependabot can automate this (`package-ecosystem: github-actions`).
 
@@ -189,6 +190,7 @@ Note that `terraform validate` **passes** on that file. Validate checks syntax, 
 - **The security toolchain is part of the attack surface.** CVE-2026-33634 compromised a vulnerability scanner's own GitHub Action. SHA pinning, explicit versions and least-privilege tokens are what limit the damage.
 - **Real AWS constraints beat checklist compliance.** Checkov wants every bucket on KMS, but S3 access logs can't be delivered to an SSE-KMS bucket. The right answer is a documented, reviewable skip, not a config that passes the scanner and then fails at runtime.
 - **Read the tool's actual behaviour, not just its docs.** With multiple output formats, Checkov's `--output-file-path` is a *file* path; pointed at a directory, it silently wrote nothing. Testing the exact CI flags locally caught this before it became a mysteriously empty Security tab.
+- **"Green" and "red" can both lie.** The first CI run failed on Gitleaks, but not because of a leak: `gitleaks-action` scans only the pushed commit range (`first^..last`), which errors on a repo's root commit, so it "scanned ~0 bytes". It also downloaded a Gitleaks version I hadn't chosen. I replaced it with the binary itself, pinned to a version and verified by SHA-256 checksum, running the same full-history `gitleaks git` scan as the local script. Always read *why* a job failed or passed.
 - **Gates must be actionable.** `--ignore-unfixed` and inline skips with reasons keep the pipeline strict without becoming noise people learn to bypass.
 
 ## Resume bullets
