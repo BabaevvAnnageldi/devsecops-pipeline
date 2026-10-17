@@ -126,9 +126,26 @@ Ironically, the *security scanner* was the attack vector. That's why this repo t
 6. The Gitleaks binary is downloaded at a pinned version and checked against its published SHA-256 before it runs.
 7. Base image pinned by digest, Python dependencies pinned exactly, Terraform providers locked by checksum.
 
-To update a pin: `git ls-remote https://github.com/<owner>/<action> refs/tags/<tag>` (use the `^{}` line for annotated tags), read the release notes and diff, then bump the SHA *and* the comment. Dependabot can automate this (`package-ecosystem: github-actions`).
+To update a pin: `git ls-remote https://github.com/<owner>/<action> refs/tags/<tag>` (use the `^{}` line for annotated tags), read the release notes and diff, then bump the SHA *and* the comment.
+
+**Keeping pins fresh:** pinning has a cost, because stale pins miss security fixes. [`.github/dependabot.yml`](.github/dependabot.yml) opens weekly PRs that bump action SHAs, the base image digest, pip versions and the Terraform provider. Each one must pass the same four gates. A **7-day cooldown** means no release is adopted in its first week, the window in which hijacked releases are usually caught.
 
 **Known residual risk:** `checkov-action` runs `ghcr.io/bridgecrewio/checkov:3.3.29`, pinned by tag inside the action, not by digest. Pinning the action's SHA freezes *which* tag it references, but not the image behind the tag.
+
+## Branch protection: making the gates mandatory
+
+A red check is only advice unless GitHub enforces it. `main` is protected so a failing change **cannot** be merged:
+
+| Rule | Setting | Why |
+|---|---|---|
+| Required status checks | all 4 jobs, bound to the GitHub Actions app | A failing gate blocks the merge; another app can't fake a passing status with the same name |
+| Require branch up to date | on | Checks must pass against the *current* `main`, not a stale base |
+| Require pull request | on (0 approvals) | No direct pushes; every change goes through the gates. 0 approvals because a solo maintainer can't approve their own PR |
+| Enforce for admins | on | The repo owner can't bypass the gates either, a common gap in real setups |
+| Conversation resolution | on | Review comments must be resolved before merging |
+| Force-push / delete `main` | blocked | History can't be rewritten to hide a change |
+
+Proof: [PR #1](../../pull/1) shows **"Merging is blocked"**. Even the repo admin can't merge it.
 
 ## Run it locally
 
@@ -196,5 +213,5 @@ Note that `terraform validate` **passes** on that file. Validate checks syntax, 
 ## Resume bullets
 
 - Built a DevSecOps CI/CD pipeline in GitHub Actions that gates every pull request with secret scanning (Gitleaks), IaC scanning (Checkov) and container vulnerability scanning (Trivy), blocking merges on hardcoded secrets, AWS misconfigurations and fixable HIGH/CRITICAL CVEs, with results published as SARIF to GitHub code scanning.
-- Hardened the pipeline against supply-chain attacks after the March 2026 trivy-action compromise (CVE-2026-33634): pinned every third-party action to a verified commit SHA, enforced least-privilege `GITHUB_TOKEN` permissions per job, pinned container base images by digest, and locked Terraform provider checksums.
+- Hardened the pipeline against supply-chain attacks after the March 2026 trivy-action compromise (CVE-2026-33634): pinned every third-party action to a verified commit SHA, enforced least-privilege `GITHUB_TOKEN` permissions per job, pinned container base images by digest, locked Terraform provider checksums, and automated pin updates with Dependabot using a 7-day release cooldown.
 - Wrote secure-by-default Terraform for AWS (S3 with Block Public Access, versioning, SSE-KMS with a rotating customer-managed key, lifecycle policies, access logging, TLS-only policies) passing 57 Checkov checks with zero failures, and demonstrated the gate catching 18 misconfigurations in a deliberately insecure change.
