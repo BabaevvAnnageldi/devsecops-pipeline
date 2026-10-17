@@ -1,0 +1,167 @@
+name: DevSecOps
+
+# Run on every push and pull request to main. Any failing job blocks the change.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: the GITHUB_TOKEN can only read repo contents by default.
+# Jobs that need more ask for it explicitly, and only for that job.
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR cancels the older, now-irrelevant run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every third-party action is pinned to a full commit SHA, not a tag.
+# Tags can be moved by whoever controls the repo; a SHA cannot.
+# (See README: the March 2026 trivy-action compromise, CVE-2026-33634.)
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Hardcoded secrets anywhere in git history
+  # ---------------------------------------------------------------------------
+  secrets-scan:
+    name: Secrets scan (Gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read # gitleaks-action lists the PR's commits to scan them
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # all commits: a secret "deleted" later is still in history
+          persist-credentials: false
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false" # commenting would need pull-requests: write
+
+  # ---------------------------------------------------------------------------
+  # 2. Terraform hygiene: formatting and syntax
+  # ---------------------------------------------------------------------------
+  terraform-checks:
+    name: Terraform fmt + validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive -diff
+
+      # -backend=false: no remote state and no AWS credentials needed.
+      # Provider downloads are verified against .terraform.lock.hcl.
+      - name: terraform init
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        run: terraform validate
+
+  # ---------------------------------------------------------------------------
+  # 3. Insecure infrastructure-as-code
+  # ---------------------------------------------------------------------------
+  iac-scan:
+    name: IaC scan (Checkov)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to the Security tab
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@6f26dc90000b74feb589a906cdfae540f5119895 # v12.3134.0
+        with:
+          config_file: .checkov.yaml
+          directory: terraform
+          output_format: cli,sarif
+          output_file_path: console,results.sarif # with multiple formats this is a FILE path
+
+      - name: Upload Checkov SARIF
+        if: ${{ !cancelled() && hashFiles('results.sarif') != '' }} # upload even when the scan fails
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: results.sarif
+          category: checkov
+
+  # ---------------------------------------------------------------------------
+  # 4. Vulnerable packages in the container image
+  # ---------------------------------------------------------------------------
+  container-scan:
+    name: Container scan (Trivy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to the Security tab
+    env:
+      IMAGE: devsecops-app:${{ github.sha }}
+      # Never 0.69.4 (malicious). Pinned explicitly so the version only changes in a reviewed commit.
+      TRIVY_VERSION: v0.75.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build --tag "$IMAGE" app
+
+      # Gate: human-readable table, fails the job on fixable HIGH/CRITICAL CVEs.
+      - name: Trivy scan (gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: ${{ env.IMAGE }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Report: same scan as SARIF for the Security tab. Runs even if the gate failed.
+      - name: Trivy scan (SARIF report)
+        if: ${{ !cancelled() }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true # binary already installed by the previous step
+          image-ref: ${{ env.IMAGE }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          limit-severities-for-sarif: true
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF
+        if: ${{ !cancelled() && hashFiles('trivy-results.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
